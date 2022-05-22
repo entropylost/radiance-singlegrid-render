@@ -1,0 +1,107 @@
+#version 460
+#extension GL_EXT_samplerless_texture_functions : enable
+#include "rgb9e5_format.glsl"
+
+layout(local_size_x = 16, local_size_y = 1, local_size_z = 1) in;
+
+struct RadianceDirectionalUniforms {
+    float slope;
+    uint flags;
+    vec3 starting_radiance;
+};
+
+struct Workgroup {
+    int offset;
+    uint light_direction_index;
+};
+
+layout (set = 0, binding = 0) uniform GlobalUniforms {
+    vec2 window_size;
+};
+
+layout (set = 1, binding = 0) uniform RadianceUniforms {
+    float inv_light_directions;
+    RadianceDirectionalUniforms[64] radiance_directional_uniforms;
+};
+
+layout (std430, set = 1, binding = 1) buffer Workgroups {
+    Workgroup[] workgroups;
+};
+
+layout (set = 2, binding = 0) uniform texture2D t_albedo;
+layout (set = 2, binding = 1) uniform texture2D t_radiance;
+layout (set = 2, binding = 2) uniform texture2D t_normal;
+
+layout (set = 3, binding = 0) uniform texture2D t_total_radiance;
+layout (r32ui, set = 3, binding = 1) uniform writeonly uimage2DArray o_directional_radiance;
+
+const float TAU = 6.2831853071;
+const uint RADIANCE_DYNAMIC_FLAGS_REVERSE_DIRECTION = 1;
+const uint RADIANCE_DYNAMIC_FLAGS_VERTICAL_TRACING = 2;
+
+void step(ivec2 position, vec2 direction, uint light_direction_index, inout vec3 radiance) {
+    vec2 normal = texelFetch(t_normal, position, 0).xy;
+    vec4 current_radiance = texelFetch(t_total_radiance, position, 0);
+    float alpha = current_radiance.w;
+    float light_in_direction = inv_light_directions;
+    imageStore(o_directional_radiance, ivec3(position, light_direction_index), uvec4(to_rgb9e5(radiance * alpha), 0, 0, 0)); // TODO: What if alpha isn't 1?
+    if (normal != vec2(0.0)) {
+        light_in_direction *= dot(normal, direction) * TAU;
+    }
+    radiance = radiance * (1.0 - alpha) + current_radiance.xyz * max(light_in_direction, 0.0);
+}
+
+void main() {
+    Workgroup workgroup = workgroups[gl_WorkGroupID.x];
+    int total_offset = workgroup.offset + int(gl_LocalInvocationID.x);
+    uint light_direction_index = workgroup.light_direction_index;
+    RadianceDirectionalUniforms uf = radiance_directional_uniforms[light_direction_index];
+    float slope = uf.slope;
+    uint flags = uf.flags;
+    vec3 radiance = uf.starting_radiance;
+    if ((flags & RADIANCE_DYNAMIC_FLAGS_REVERSE_DIRECTION) == 0) {
+        if ((flags & RADIANCE_DYNAMIC_FLAGS_VERTICAL_TRACING) == 0) {
+            vec2 direction = normalize(vec2(1, slope));
+            float intersection_a = -float(total_offset) / slope;
+            float intersection_b = (window_size.y - total_offset) / slope;
+            int start = max(0, int(min(intersection_a, intersection_b)));
+            int stop = min(int(window_size.x), int(ceil(max(intersection_a, intersection_b))));
+            for (int i = start; i < stop; i++) {
+                ivec2 position = ivec2(i, total_offset + int(floor(i * slope)));
+                step(position, direction, light_direction_index, radiance);
+            }
+        } else {
+            vec2 direction = normalize(vec2(slope, 1));
+            float intersection_a = -float(total_offset) / slope;
+            float intersection_b = (window_size.x - total_offset) / slope;
+            int start = max(0, int(min(intersection_a, intersection_b)));
+            int stop = min(int(window_size.y), int(ceil(max(intersection_a, intersection_b))));
+            for (int i = start; i < stop; i++) {
+                ivec2 position = ivec2(total_offset + int(floor(i * slope)), i);
+                step(position, direction, light_direction_index, radiance);
+            }
+        }
+    } else {
+        if ((flags & RADIANCE_DYNAMIC_FLAGS_VERTICAL_TRACING) == 0) {
+            vec2 direction = -normalize(vec2(1, slope));
+            float intersection_a = -float(total_offset) / slope;
+            float intersection_b = (window_size.y - total_offset) / slope;
+            int start = max(0, int(min(intersection_a, intersection_b)));
+            int stop = min(int(window_size.x - 1), int(ceil(max(intersection_a, intersection_b))));
+            for (int i = stop; i >= start; i--) { // Doing stop - 1 crashes the computer.
+                ivec2 position = ivec2(i, total_offset + int(floor(i * slope)));
+                step(position, direction, light_direction_index, radiance);
+            }
+        } else {
+            vec2 direction = -normalize(vec2(slope, 1));
+            float intersection_a = -float(total_offset) / slope;
+            float intersection_b = (window_size.x - total_offset) / slope;
+            int start = max(0, int(min(intersection_a, intersection_b)));
+            int stop = min(int(window_size.y - 1), int(ceil(max(intersection_a, intersection_b))));
+            for (int i = stop; i >= start; i--) {
+                ivec2 position = ivec2(total_offset + int(floor(i * slope)), i);
+                step(position, direction, light_direction_index, radiance);
+            }
+        }
+    }
+}
