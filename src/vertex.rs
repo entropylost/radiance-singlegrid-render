@@ -1,82 +1,24 @@
 use std::mem::size_of;
 
 use bytemuck::{Pod, Zeroable};
-use generational_arena::{Arena, Index};
 use nalgebra::{vector, Vector2};
-use palette::{Alpha, IntoColor, LinSrgb, LinSrgba, Srgb, Srgba};
+use palette::{Alpha, IntoColor, LinSrgb, LinSrgba};
 use wgpu::{vertex_attr_array, BufferAddress, VertexAttribute, VertexBufferLayout, VertexStepMode};
 
-#[derive(Debug, Copy, Clone)]
-pub struct Material {
-    pub albedo: Srgba,
-    pub render_albedo: Srgba,
-    pub radiance: Srgb,
-    pub render_radiance: Srgb,
-}
-
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default, Pod, Zeroable)]
-pub struct RawMaterial {
-    pub albedo: LinSrgba,
-    pub render_albedo: LinSrgba,
-    pub radiance: LinSrgba,
-    pub render_radiance: LinSrgba,
-}
-
-impl From<Material> for RawMaterial {
-    fn from(material: Material) -> Self {
-        let albedo = material.albedo.into();
-        let render_albedo = material.render_albedo.into();
-        Self {
-            albedo,
-            render_albedo,
-            radiance: Alpha {
-                color: material.radiance.into(),
-                alpha: albedo.alpha,
-            },
-            render_radiance: Alpha {
-                color: material.radiance.into(),
-                alpha: render_albedo.alpha,
-            },
-        }
-    }
-}
-
-#[derive(Debug, Copy, Clone)]
-pub struct FullMaterial {
-    pub external: Material,
-    pub internal: Material,
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone, Default, Pod, Zeroable)]
-pub struct FullRawMaterial {
-    pub external: RawMaterial,
-    pub internal: RawMaterial,
-}
-
-impl From<FullMaterial> for FullRawMaterial {
-    fn from(material: FullMaterial) -> Self {
-        Self {
-            external: material.external.into(),
-            internal: material.internal.into(),
-        }
-    }
-}
-
-#[repr(C)]
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Vertex {
     pub position: Vector2<f32>,
     pub normal: Vector2<f32>,
-    pub material_id: u32,
+    pub albedo: LinSrgba,
+    pub radiance: LinSrgba, // TODO: Make RawVertex types.
 }
 
 impl Vertex {
-    const ATTRIBUTES: [VertexAttribute; 3] =
-        vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32];
+    const ATTRIBUTES: [VertexAttribute; 4] =
+        vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4];
 
-    pub(crate) fn layout<'a>() -> VertexBufferLayout<'a> {
+    pub fn layout<'a>() -> VertexBufferLayout<'a> {
         VertexBufferLayout {
             array_stride: size_of::<Vertex>() as BufferAddress,
             step_mode: VertexStepMode::Vertex,
@@ -87,24 +29,16 @@ impl Vertex {
 
 #[derive(Debug, Clone)]
 pub struct VertexList {
-    triangles: Arena<[Vertex; 3]>,
-    materials: Arena<FullRawMaterial>,
+    triangles: Vec<[Vertex; 3]>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TriangleHandle(Index);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MaterialHandle(Index);
-
 impl VertexList {
-    pub fn new(capacity: usize) -> Self {
+    pub fn new() -> Self {
         Self {
-            triangles: Arena::with_capacity(capacity),
-            materials: Arena::with_capacity(capacity),
+            triangles: Vec::new(),
         }
     }
-    pub fn triangle(&mut self, triangle: [Vertex; 3]) -> TriangleHandle {
+    pub fn triangle(&mut self, triangle: [Vertex; 3]) -> &mut Self {
         self.triangles.push(triangle);
         self
     }
@@ -115,7 +49,7 @@ impl VertexList {
         y: Vector2<f32>,
         albedo: impl IntoColor<LinSrgba>,
         radiance: impl IntoColor<LinSrgb>,
-    ) -> [TriangleHandle; 4] {
+    ) -> &mut Self {
         let albedo = albedo.into_color();
         let radiance = Alpha {
             color: radiance.into_color(),
